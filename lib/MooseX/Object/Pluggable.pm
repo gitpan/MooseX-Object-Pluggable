@@ -7,7 +7,7 @@ use Moose::Role;
 use Class::Inspector;
 
 
-our $VERSION = '0.0001';
+our $VERSION = '0.0002';
 
 =head1 NAME
 

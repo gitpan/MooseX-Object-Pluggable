@@ -11,5 +11,6 @@ no_index:
     - inc
     - t
 requires: 
+  Class::Inspector: 1.04
   Moose: 0.17
-version: 0.0001
+version: 0.0002

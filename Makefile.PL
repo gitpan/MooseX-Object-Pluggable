@@ -9,8 +9,10 @@ abstract 'Add plugin support to your Moose classes via roles.';
 all_from 'lib/MooseX/Object/Pluggable.pm';
 
 # Specific dependencies
-requires 'Moose'          => 0.17;
-build_requires 'Test::More'     => 0;
+requires 'Moose'              => 0.17;
+requires 'Class::Inspector'   => 1.04;
+
+build_requires 'Test::More'   => 0;
 
 #no_index directory => 'dist';
     
