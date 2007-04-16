@@ -11,6 +11,6 @@ no_index:
     - inc
     - t
 requires: 
-  Class::Inspector: 1.04
+  Module::Pluggable::Object: 0
   Moose: 0.17
-version: 0.0004
+version: 0.0005
