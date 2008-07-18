@@ -5,7 +5,7 @@ use Moose::Role;
 use Class::MOP;
 use Module::Pluggable::Object;
 
-our $VERSION = '0.0007';
+our $VERSION = '0.0008';
 
 =head1 NAME
 
@@ -52,12 +52,12 @@ their consuming classes, so it is important to watch for load order as plugins c
 and will overload each other. You may also add attributes through has.
 
 Please note that when you load at runtime you lose the ability to wrap C<BUILD>
-and roles using C<has> will not go through comile time checks like C<required>
+and roles using C<has> will not go through compile time checks like C<required>
 and <default>.
 
 Even though C<override> will work , I STRONGLY discourage it's use
 and a warning will be thrown if you try to use it.
-This is closely linked to the way multiple roles being applies is handles and is not
+This is closely linked to the way multiple roles being applied is handled and is not
 likely to change. C<override> bevavior is closely linked to inheritance and thus will
 likely not work as you expect it in multiple inheritance situations. Point being,
 save yourself the headache.
@@ -69,11 +69,6 @@ C<$self-E<gt>blessed> and C<ref $self> will no longer return the name of your ob
 they will instead return the name of the anonymous class created at runtime.
 See C<_original_class_name>.
 
-=head1 Notice regarding extensions.
-
-Because I have been able to identify a real-world use case for the extension mechanism
-I have decided to deprecate it and remove it in the next major release.
-
 =head1 Usage
 
 For a simple example see the tests included in this distribution.
@@ -83,23 +78,6 @@ For a simple example see the tests included in this distribution.
 =head2 _plugin_ns
 
 String. The prefix to use for plugin names provided. MyApp::Plugin is sensible.
-
-=head2 _plugin_ext
-
-Boolean. Indicates whether we should attempt to load plugin extensions.
-Defaults to true;
-
-=head2 _plugin_ext_ns
-
-B<THIS FUNCTIONALITY HAS BEEN DEPRECATED AND WILL GO AWAY.> If you use
-this, please email me, but I am fairly sure that nobody uses this at
-all and it's just adding bloat and making things kind of ugly.
-
-String. The namespace plugin extensions have. Defaults to 'ExtensionFor'.
-
-This means that is _plugin_ns is "MyApp::Plugin" and _plugin_ext_ns is
-"ExtensionFor" loading plugin "Bar" would search for extensions in
-"MyApp::Plugin::Bar::ExtensionFor::*".
 
 =head2 _plugin_app_ns
 
@@ -120,101 +98,76 @@ available plugins.
 
 #--------#---------#---------#---------#---------#---------#---------#---------#
 
-has _plugin_ns      => (is => 'rw', required => 1, isa => 'Str',
-                        default => 'Plugin');
-has _plugin_ext     => (is => 'rw', required => 1, isa => 'Bool',
-                        default => 1);
-has _plugin_ext_ns  => (is => 'rw', required => 1, isa => 'Str',
-                        default => 'ExtensionFor');
-has _plugin_loaded  => (is => 'rw', required => 1, isa => 'HashRef',
-                        default => sub{ {} });
-has _plugin_app_ns  => (is => 'rw', required => 1, isa => 'ArrayRef', lazy => 1,
-                        auto_deref => 1,
-                        default => sub{ shift->_build_plugin_app_ns },
-                        trigger => sub{ $_[0]->_clear_plugin_locator
-                                         if $_[0]->_has_plugin_locator; },
-                       );
-has _plugin_locator => (is => 'rw', required => 1, lazy => 1,
-                        isa       => 'Module::Pluggable::Object',
-                        clearer   => '_clear_plugin_locator',
-                        predicate => '_has_plugin_locator',
-                        default   => sub{ shift->_build_plugin_locator });
+has _plugin_ns =>
+  (
+   is => 'rw',
+   required => 1,
+   isa => 'Str',
+   default => sub{ 'Plugin' },
+  );
+
+has _plugin_loaded =>
+  (
+   is => 'rw',
+   required => 1,
+   isa => 'HashRef',
+   default => sub{ {} }
+  );
+
+has _plugin_app_ns =>
+  (
+   is => 'rw',
+   required => 1,
+   isa => 'ArrayRef',
+   lazy => 1,
+   auto_deref => 1,
+   builder => '_build_plugin_app_ns',
+   trigger => sub{ $_[0]->_clear_plugin_locator if $_[0]->_has_plugin_locator; },
+  );
+
+has _plugin_locator =>
+  (
+   is => 'rw',
+   required => 1,
+   lazy => 1,
+   isa => 'Module::Pluggable::Object',
+   clearer => '_clear_plugin_locator',
+   predicate => '_has_plugin_locator',
+   builder => '_build_plugin_locator'
+  );
 
 #--------#---------#---------#---------#---------#---------#---------#---------#
 
 =head1 Public Methods
 
-=head2 load_plugin $plugin
-
-Load the apropriate role for C<$plugin> as well as any extensions it provides
-if extensions are enabled.
-
-=cut
-
-sub load_plugin{
-    my ($self, $plugin) = @_;
-    die("You must provide a plugin name") unless $plugin;
-
-    my $loaded = $self->_plugin_loaded;
-    return 1 if exists $loaded->{$plugin};
-
-    my $role = $self->_role_from_plugin($plugin);
-
-    $loaded->{$plugin} = $role      if $self->_load_and_apply_role($role);
-    $self->load_plugin_ext($plugin) if $self->_plugin_ext;
-
-    return exists $loaded->{$plugin};
-}
-
 =head2 load_plugins @plugins
 
-Load all C<@plugins>.
+=head2 load_plugin $plugin
+
+Load the apropriate role for C<$plugin>.
 
 =cut
 
-
 sub load_plugins {
-  my $self = shift;
-  $self->load_plugin($_) for @_;
+    my ($self, @plugins) = @_;
+    die("You must provide a plugin name") unless @plugins;
+
+    my $loaded = $self->_plugin_loaded;
+    my @load = grep { not exists $loaded->{$_} } @plugins;
+    my @roles = map { $self->_role_from_plugin($_) } @load;
+
+    if ( $self->_load_and_apply_role(@roles) ) {
+        @{ $loaded }{@load} = @roles;
+        return 1;
+    } else {
+        return;
+    }
 }
 
 
-=head2 load_plugin_ext
-
-B<THIS FUNCTIONALITY HAS BEEN DEPRECATED AND WILL GO AWAY.> If you use
-this, please email me, but I am fairly sure that nobody uses this at
-all and it's just adding bloat and making things kind of ugly.
-
-Will load any extensions for a particular plugin. This should be called
-automatically by C<load_plugin> so you don't need to worry about it.
-It basically attempts to load any extension that exists for a plugin
-that is already loaded. The only reason for using this is if you want to
-keep _plugin_ext as false and only load extensions manually, which I don't
-recommend.
-
-=cut
-
-sub load_plugin_ext{
-    my ($self, $plugin) = @_;
-    die("You must provide a plugin name") unless $plugin;
-    my $role = $self->_plugin_loaded->{$plugin};
-
-    # $p for plugin, $r for role
-    while( my($p,$r) = each %{ $self->_plugin_loaded }){
-
-        my $ext = join "::", $role, $self->_plugin_ext_ns, $p;
-        if( $plugin =~ /^\+(.*)/ ){
-            eval{ $self->_load_and_apply_role( $ext ) };
-        } else{
-            $self->_load_and_apply_role( $ext ) if
-                grep{ /^${ext}$/ } $self->_plugin_locator->plugins;
-        }
-
-        #go back to prev loaded modules and load extensions for current module?
-        #my $ext2 = join "::", $r, $self->_plugin_ext_ns, $plugin;
-        #$self->_load_and_apply_role( $ext2 )
-        #    if Class::Inspector->installed($ext2);
-    }
+sub load_plugin {
+  my $self = shift;
+  $self->load_plugins(@_);
 }
 
 =head2 _original_class_name
@@ -235,8 +188,7 @@ sub _original_class_name{
 
 There's nothing stopping you from using these, but if you are using them
 for anything thats not really complicated you are probably doing
-something wrong. Some of these may be inlined in the future if performance
-becomes an issue (which I doubt).
+something wrong.
 
 =head2 _role_from_plugin $plugin
 
@@ -259,7 +211,7 @@ sub _role_from_plugin{
     #Father, please forgive me for I have sinned.
     my @roles = grep{ /${o}$/ } $self->_plugin_locator->plugins;
 
-    die("Unable to locate plugin") unless @roles;
+    croak("Unable to locate plugin '$plugin'") unless @roles;
     return $roles[0] if @roles == 1;
 
     my $i = 0;
@@ -270,7 +222,7 @@ sub _role_from_plugin{
     return shift @roles;
 }
 
-=head2 _load_and_apply_role $role
+=head2 _load_and_apply_role @roles
 
 Require C<$role> if it is not already loaded and apply it. This is
 the meat of this module.
@@ -278,17 +230,20 @@ the meat of this module.
 =cut
 
 sub _load_and_apply_role{
-    my ($self, $role) = @_;
-    die("You must provide a role name") unless $role;
+    my ($self, @roles) = @_;
+    die("You must provide a role name") unless @roles;
 
-    eval { Class::MOP::load_class($role) };
-    confess("Failed to load role: ${role} $@") if $@;
+    foreach my $role ( @roles ) {
+        eval { Class::MOP::load_class($role) };
+        confess("Failed to load role: ${role} $@") if $@;
 
-    carp("Using 'override' is strongly discouraged and may not behave ".
-         "as you expect it to. Please use 'around'")
+        carp("Using 'override' is strongly discouraged and may not behave ".
+            "as you expect it to. Please use 'around'")
         if scalar keys %{ $role->meta->get_override_method_modifiers_map };
+    }
 
-    $role->meta->apply( $self );
+    Moose::Util::apply_all_roles( $self, @roles );
+
     return 1;
 }
 
