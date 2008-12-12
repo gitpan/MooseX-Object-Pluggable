@@ -5,7 +5,7 @@ use Moose::Role;
 use Class::MOP;
 use Module::Pluggable::Object;
 
-our $VERSION = '0.0008';
+our $VERSION = '0.0009';
 
 =head1 NAME
 
@@ -155,6 +155,8 @@ sub load_plugins {
     my $loaded = $self->_plugin_loaded;
     my @load = grep { not exists $loaded->{$_} } @plugins;
     my @roles = map { $self->_role_from_plugin($_) } @load;
+
+    return if @roles == 0;
 
     if ( $self->_load_and_apply_role(@roles) ) {
         @{ $loaded }{@load} = @roles;
@@ -342,6 +344,8 @@ L<http://search.cpan.org/dist/MooseX-Object-Pluggable>
 =item Matt S Trout <mst@shadowcatsystems.co.uk> - ideas / planning.
 
 =item Stevan Little - EVERYTHING. Without him this would have never happened.
+
+=item Shawn M Moore - bugfixes
 
 =back
 
