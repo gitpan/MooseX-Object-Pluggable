@@ -1,16 +1,163 @@
 package MooseX::Object::Pluggable;
+{
+  $MooseX::Object::Pluggable::VERSION = '0.0012';
+}
+# git description: v0.0011-6-g98105e4
+
+BEGIN {
+  $MooseX::Object::Pluggable::AUTHORITY = 'cpan:GRODITI';
+}
+# ABSTRACT: Make your classes pluggable
 
 use Carp;
 use Moose::Role;
-use Class::MOP;
+use Class::Load 'load_class';
 use Scalar::Util 'blessed';
 use Module::Pluggable::Object;
 
-our $VERSION = '0.0011';
+
+#--------#---------#---------#---------#---------#---------#---------#---------#
+
+has _plugin_ns => (
+  is => 'rw',
+  required => 1,
+  isa => 'Str',
+  default => sub{ 'Plugin' },
+);
+
+has _original_class_name => (
+  is => 'ro',
+  required => 1,
+  isa => 'Str',
+  default => sub{ blessed($_[0]) },
+);
+
+has _plugin_loaded => (
+  is => 'rw',
+  required => 1,
+  isa => 'HashRef',
+  default => sub{ {} }
+);
+
+has _plugin_app_ns => (
+  is => 'rw',
+  required => 1,
+  isa => 'ArrayRef',
+  lazy => 1,
+  auto_deref => 1,
+  builder => '_build_plugin_app_ns',
+  trigger => sub{ $_[0]->_clear_plugin_locator if $_[0]->_has_plugin_locator; },
+);
+
+has _plugin_locator => (
+  is => 'rw',
+  required => 1,
+  lazy => 1,
+  isa => 'Module::Pluggable::Object',
+  clearer => '_clear_plugin_locator',
+  predicate => '_has_plugin_locator',
+  builder => '_build_plugin_locator'
+);
+
+#--------#---------#---------#---------#---------#---------#---------#---------#
+
+
+sub load_plugins {
+    my ($self, @plugins) = @_;
+    die("You must provide a plugin name") unless @plugins;
+
+    my $loaded = $self->_plugin_loaded;
+    my @load = grep { not exists $loaded->{$_} } @plugins;
+    my @roles = map { $self->_role_from_plugin($_) } @load;
+
+    return if @roles == 0;
+
+    if ( $self->_load_and_apply_role(@roles) ) {
+        @{ $loaded }{@load} = @roles;
+        return 1;
+    } else {
+        return;
+    }
+}
+
+
+sub load_plugin {
+  my $self = shift;
+  $self->load_plugins(@_);
+}
+
+
+sub _role_from_plugin{
+    my ($self, $plugin) = @_;
+
+    return $1 if( $plugin =~ /^\+(.*)/ );
+
+    my $o = join '::', $self->_plugin_ns, $plugin;
+    #Father, please forgive me for I have sinned.
+    my @roles = grep{ /${o}$/ } $self->_plugin_locator->plugins;
+
+    croak("Unable to locate plugin '$plugin'") unless @roles;
+    return $roles[0] if @roles == 1;
+
+    my $i = 0;
+    my %presedence_list = map{ $i++; "${_}::${o}", $i } $self->_plugin_app_ns;
+
+    @roles = sort{ $presedence_list{$a} <=> $presedence_list{$b}} @roles;
+
+    return shift @roles;
+}
+
+
+sub _load_and_apply_role{
+    my ($self, @roles) = @_;
+    die("You must provide a role name") unless @roles;
+
+    foreach my $role ( @roles ) {
+        eval { load_class($role) };
+        confess("Failed to load role: ${role} $@") if $@;
+
+        carp("Using 'override' is strongly discouraged and may not behave ".
+            "as you expect it to. Please use 'around'")
+        if scalar keys %{ $role->meta->get_override_method_modifiers_map };
+    }
+
+    Moose::Util::apply_all_roles( $self, @roles );
+
+    return 1;
+}
+
+
+sub _build_plugin_app_ns{
+    my $self = shift;
+    my @names = (grep {$_ !~ /^Moose::/} $self->meta->class_precedence_list);
+    return \@names;
+}
+
+
+sub _build_plugin_locator{
+    my $self = shift;
+
+    my $locator = Module::Pluggable::Object->new
+        ( search_path =>
+          [ map { join '::', ($_, $self->_plugin_ns) } $self->_plugin_app_ns ]
+        );
+    return $locator;
+}
+
+
+1;
+
+=pod
+
+=encoding UTF-8
 
 =head1 NAME
 
-    MooseX::Object::Pluggable - Make your classes pluggable
+MooseX::Object::Pluggable - Make your classes pluggable
+
+=head1 VERSION
+
+version 0.0012
 
 =head1 SYNOPSIS
 
@@ -59,7 +206,7 @@ and <default>.
 Even though C<override> will work , I STRONGLY discourage it's use
 and a warning will be thrown if you try to use it.
 This is closely linked to the way multiple roles being applied is handled and is not
-likely to change. C<override> bevavior is closely linked to inheritance and thus will
+likely to change. C<override> behavior is closely linked to inheritance and thus will
 likely not work as you expect it in multiple inheritance situations. Point being,
 save yourself the headache.
 
@@ -83,9 +230,9 @@ String. The prefix to use for plugin names provided. MyApp::Plugin is sensible.
 =head2 _plugin_app_ns
 
 ArrayRef, Accessor automatically dereferences into array on a read call.
-By default will be filled with the class name and it's prescedents, it is used
+By default will be filled with the class name and its precedents, it is used
 to determine which directories to look for plugins as well as which plugins
-take presedence upon namespace collitions. This allows you to subclass a pluggable
+take precedence upon namespace collisions. This allows you to subclass a pluggable
 class and still use it's plugins while using yours first if they are available.
 
 =head2 _plugin_locator
@@ -95,57 +242,12 @@ available plugins.
 
 =head2 _original_class_name
 
+=for stopwords instantiation
+
 Because of the way roles apply C<$self-E<gt>blessed> and C<ref $self> will
 no longer return what you expect. Instead, upon instantiation, the name of the
 class instantiated will be stored in this attribute if you need to access the
 name the class held before any runtime roles were applied.
-
-=cut
-
-#--------#---------#---------#---------#---------#---------#---------#---------#
-
-has _plugin_ns => (
-  is => 'rw',
-  required => 1,
-  isa => 'Str',
-  default => sub{ 'Plugin' },
-);
-
-has _original_class_name => (
-  is => 'ro',
-  required => 1,
-  isa => 'Str',
-  default => sub{ blessed($_[0]) },
-);
-
-has _plugin_loaded => (
-  is => 'rw',
-  required => 1,
-  isa => 'HashRef',
-  default => sub{ {} }
-);
-
-has _plugin_app_ns => (
-  is => 'rw',
-  required => 1,
-  isa => 'ArrayRef',
-  lazy => 1,
-  auto_deref => 1,
-  builder => '_build_plugin_app_ns',
-  trigger => sub{ $_[0]->_clear_plugin_locator if $_[0]->_has_plugin_locator; },
-);
-
-has _plugin_locator => (
-  is => 'rw',
-  required => 1,
-  lazy => 1,
-  isa => 'Module::Pluggable::Object',
-  clearer => '_clear_plugin_locator',
-  predicate => '_has_plugin_locator',
-  builder => '_build_plugin_locator'
-);
-
-#--------#---------#---------#---------#---------#---------#---------#---------#
 
 =head1 Public Methods
 
@@ -153,38 +255,12 @@ has _plugin_locator => (
 
 =head2 load_plugin $plugin
 
-Load the apropriate role for C<$plugin>.
-
-=cut
-
-sub load_plugins {
-    my ($self, @plugins) = @_;
-    die("You must provide a plugin name") unless @plugins;
-
-    my $loaded = $self->_plugin_loaded;
-    my @load = grep { not exists $loaded->{$_} } @plugins;
-    my @roles = map { $self->_role_from_plugin($_) } @load;
-
-    return if @roles == 0;
-
-    if ( $self->_load_and_apply_role(@roles) ) {
-        @{ $loaded }{@load} = @roles;
-        return 1;
-    } else {
-        return;
-    }
-}
-
-
-sub load_plugin {
-  my $self = shift;
-  $self->load_plugins(@_);
-}
+Load the appropriate role for C<$plugin>.
 
 =head1 Private Methods
 
 There's nothing stopping you from using these, but if you are using them
-for anything thats not really complicated you are probably doing
+for anything that's not really complicated you are probably doing
 something wrong.
 
 =head2 _role_from_plugin $plugin
@@ -197,108 +273,36 @@ and the first valid value from C<_plugin_app_ns> will be returned. Example
    #assuming appname MyApp and C<_plugin_ns> 'Plugin'
    $self->_role_from_plugin("MyPlugin"); # MyApp::Plugin::MyPlugin
 
-=cut
-
-sub _role_from_plugin{
-    my ($self, $plugin) = @_;
-
-    return $1 if( $plugin =~ /^\+(.*)/ );
-
-    my $o = join '::', $self->_plugin_ns, $plugin;
-    #Father, please forgive me for I have sinned.
-    my @roles = grep{ /${o}$/ } $self->_plugin_locator->plugins;
-
-    croak("Unable to locate plugin '$plugin'") unless @roles;
-    return $roles[0] if @roles == 1;
-
-    my $i = 0;
-    my %presedence_list = map{ $i++; "${_}::${o}", $i } $self->_plugin_app_ns;
-
-    @roles = sort{ $presedence_list{$a} <=> $presedence_list{$b}} @roles;
-
-    return shift @roles;
-}
-
 =head2 _load_and_apply_role @roles
 
 Require C<$role> if it is not already loaded and apply it. This is
 the meat of this module.
 
-=cut
-
-sub _load_and_apply_role{
-    my ($self, @roles) = @_;
-    die("You must provide a role name") unless @roles;
-
-    foreach my $role ( @roles ) {
-        eval { Class::MOP::load_class($role) };
-        confess("Failed to load role: ${role} $@") if $@;
-
-        carp("Using 'override' is strongly discouraged and may not behave ".
-            "as you expect it to. Please use 'around'")
-        if scalar keys %{ $role->meta->get_override_method_modifiers_map };
-    }
-
-    Moose::Util::apply_all_roles( $self, @roles );
-
-    return 1;
-}
-
 =head2 _build_plugin_app_ns
 
 Automatically builds the _plugin_app_ns attribute with the classes in the
-class presedence list that are not part of Moose.
-
-=cut
-
-sub _build_plugin_app_ns{
-    my $self = shift;
-    my @names = (grep {$_ !~ /^Moose::/} $self->meta->class_precedence_list);
-    return \@names;
-}
+class precedence list that are not part of Moose.
 
 =head2 _build_plugin_locator
 
 Automatically creates a L<Module::Pluggable::Object> instance with the correct
 search_path.
 
-=cut
-
-sub _build_plugin_locator{
-    my $self = shift;
-
-    my $locator = Module::Pluggable::Object->new
-        ( search_path =>
-          [ map { join '::', ($_, $self->_plugin_ns) } $self->_plugin_app_ns ]
-        );
-    return $locator;
-}
-
 =head2 meta
 
 Keep tests happy. See L<Moose>
 
-=cut
-
-1;
-
-__END__;
-
 =head1 SEE ALSO
 
 L<Moose>, L<Moose::Role>, L<Class::Inspector>
-
-=head1 AUTHOR
-
-Guillermo Roditi, <groditi@cpan.org>
 
 =head1 BUGS
 
 Holler?
 
 Please report any bugs or feature requests to
-C<bug-moosex-object-pluggable at rt.cpan.org>, or through the web interface at
-L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=MooseX-Object-Pluggable>.
+C<bug-MooseX-Object-Pluggable at rt.cpan.org>, or through the web interface at
+L<http://rt.cpan.org/Public/Dist/Display.html?Name=MooseX-Object-Pluggable>.
 I will be notified, and then you'll automatically be notified of progress on
 your bug as I make changes.
 
@@ -309,6 +313,8 @@ You can find documentation for this module with the perldoc command.
     perldoc MooseX-Object-Pluggable
 
 You can also look for information at:
+
+=for stopwords AnnoCPAN
 
 =over 4
 
@@ -332,6 +338,8 @@ L<http://search.cpan.org/dist/MooseX-Object-Pluggable>
 
 =head1 ACKNOWLEDGEMENTS
 
+=for stopwords Stevan
+
 =over 4
 
 =item #Moose - Huge number of questions
@@ -344,10 +352,18 @@ L<http://search.cpan.org/dist/MooseX-Object-Pluggable>
 
 =back
 
-=head1 COPYRIGHT
+=head1 AUTHOR
 
-Copyright 2007 Guillermo Roditi.  All Rights Reserved.  This is
-free software; you may redistribute it and/or modify it under the same
-terms as Perl itself.
+Guillermo Roditi <groditi@cpan.org>
+
+=head1 COPYRIGHT AND LICENSE
+
+This software is copyright (c) 2007 by Guillermo Roditi <groditi@cpan.org>.
+
+This is free software; you can redistribute it and/or modify it under
+the same terms as the Perl 5 programming language system itself.
 
 =cut
+
+__END__;
+
