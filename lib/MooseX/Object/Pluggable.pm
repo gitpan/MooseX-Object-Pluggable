@@ -1,20 +1,113 @@
 package MooseX::Object::Pluggable;
-{
-  $MooseX::Object::Pluggable::VERSION = '0.0012';
-}
-# git description: v0.0011-6-g98105e4
-
 BEGIN {
   $MooseX::Object::Pluggable::AUTHORITY = 'cpan:GRODITI';
 }
+# git description: v0.0012-15-gff720b0
+$MooseX::Object::Pluggable::VERSION = '0.0013';
 # ABSTRACT: Make your classes pluggable
 
 use Carp;
 use Moose::Role;
-use Class::Load 'load_class';
+use Module::Runtime 'use_module';
 use Scalar::Util 'blessed';
+use Try::Tiny;
 use Module::Pluggable::Object;
+use Moose::Util 'find_meta';
+use namespace::autoclean;
 
+# =head1 SYNOPSIS
+#
+#     package MyApp;
+#     use Moose;
+#
+#     with 'MooseX::Object::Pluggable';
+#
+#     ...
+#
+#     package MyApp::Plugin::Pretty;
+#     use Moose::Role;
+#
+#     sub pretty{ print "I am pretty" }
+#
+#     1;
+#
+#     #
+#     use MyApp;
+#     my $app = MyApp->new;
+#     $app->load_plugin('Pretty');
+#     $app->pretty;
+#
+# =head1 DESCRIPTION
+#
+# This module is meant to be loaded as a role from Moose-based classes.
+# It will add five methods and four attributes to assist you with the loading
+# and handling of plugins and extensions for plugins. I understand that this may
+# pollute your namespace, however I took great care in using the least ambiguous
+# names possible.
+#
+# =head1 How plugins Work
+#
+# Plugins and extensions are just Roles by a fancy name. They are loaded at runtime
+# on demand and are instance, not class based. This means that if you have more than
+# one instance of a class they can all have different plugins loaded. This is a feature.
+#
+# Plugin methods are allowed to C<around>, C<before>, C<after>
+# their consuming classes, so it is important to watch for load order as plugins can
+# and will overload each other. You may also add attributes through C<has>.
+#
+# Please note that when you load at runtime you lose the ability to wrap C<BUILD>
+# and roles using C<has> will not go through compile time checks like C<required>
+# and C<default>.
+#
+# Even though C<override> will work, I B<STRONGLY> discourage its use
+# and a warning will be thrown if you try to use it.
+# This is closely linked to the way multiple roles being applied is handled and is not
+# likely to change. C<override> behavior is closely linked to inheritance and thus will
+# likely not work as you expect it in multiple inheritance situations. Point being,
+# save yourself the headache.
+#
+# =head1 How plugins are loaded
+#
+# When roles are applied at runtime an anonymous class will wrap your class and
+# C<< $self->blessed >>, C<< ref $self >> and C<< $self->meta->name >>
+# will no longer return the name of your object;
+# they will instead return the name of the anonymous class created at runtime.
+# See C<_original_class_name>.
+#
+# =head1 Usage
+#
+# For a simple example see the tests included in this distribution.
+#
+# =head1 Attributes
+#
+# =head2 _plugin_ns
+#
+# String. The prefix to use for plugin names provided. C<MyApp::Plugin> is sensible.
+#
+# =head2 _plugin_app_ns
+#
+# An ArrayRef accessor that automatically dereferences into array on a read call.
+# By default it will be filled with the class name and its precedents. It is used
+# to determine which directories to look for plugins as well as which plugins
+# take precedence upon namespace collisions. This allows you to subclass a pluggable
+# class and still use its plugins while using yours first if they are available.
+#
+# =head2 _plugin_locator
+#
+# An automatically built instance of L<Module::Pluggable::Object> used to locate
+# available plugins.
+#
+# =head2 _original_class_name
+#
+# =for stopwords instantiation
+#
+# Because of the way roles apply, C<< $self->blessed >>, C<< ref $self >>
+# and C<< $self->meta->name >> will
+# no longer return what you expect. Instead, upon instantiation, the name of the
+# class instantiated will be stored in this attribute if you need to access the
+# name the class held before any runtime roles were applied.
+#
+# =cut
 
 #--------#---------#---------#---------#---------#---------#---------#---------#
 
@@ -61,23 +154,34 @@ has _plugin_locator => (
 
 #--------#---------#---------#---------#---------#---------#---------#---------#
 
+# =head1 Public Methods
+#
+# =head2 load_plugins @plugins
+#
+# =head2 load_plugin $plugin
+#
+# Load the appropriate role for C<$plugin>.
+#
+# =cut
 
 sub load_plugins {
     my ($self, @plugins) = @_;
     die("You must provide a plugin name") unless @plugins;
 
     my $loaded = $self->_plugin_loaded;
-    my @load = grep { not exists $loaded->{$_} } @plugins;
-    my @roles = map { $self->_role_from_plugin($_) } @load;
+    @plugins = grep { not exists $loaded->{$_} } @plugins;
 
-    return if @roles == 0;
+    return if @plugins == 0;
 
-    if ( $self->_load_and_apply_role(@roles) ) {
-        @{ $loaded }{@load} = @roles;
-        return 1;
-    } else {
-        return;
+    foreach my $plugin (@plugins)
+    {
+        my $role = $self->_role_from_plugin($plugin);
+        return if not $self->_load_and_apply_role($role);
+
+        $loaded->{$plugin} = $role;
     }
+
+    return 1;
 }
 
 
@@ -86,6 +190,23 @@ sub load_plugin {
   $self->load_plugins(@_);
 }
 
+# =head1 Private Methods
+#
+# There's nothing stopping you from using these, but if you are using them
+# for anything that's not really complicated you are probably doing
+# something wrong.
+#
+# =head2 _role_from_plugin $plugin
+#
+# Creates a role name from a plugin name. If the plugin name is prepended
+# with a C<+> it will be treated as a full name returned as is. Otherwise
+# a string consisting of C<$plugin>  prepended with the C<_plugin_ns>
+# and the first valid value from C<_plugin_app_ns> will be returned. Example
+#
+#    #assuming appname MyApp and C<_plugin_ns> 'Plugin'
+#    $self->_role_from_plugin("MyPlugin"); # MyApp::Plugin::MyPlugin
+#
+# =cut
 
 sub _role_from_plugin{
     my ($self, $plugin) = @_;
@@ -100,32 +221,45 @@ sub _role_from_plugin{
     return $roles[0] if @roles == 1;
 
     my $i = 0;
-    my %presedence_list = map{ $i++; "${_}::${o}", $i } $self->_plugin_app_ns;
+    my %precedence_list = map{ $i++; "${_}::${o}", $i } $self->_plugin_app_ns;
 
-    @roles = sort{ $presedence_list{$a} <=> $presedence_list{$b}} @roles;
+    @roles = sort{ $precedence_list{$a} <=> $precedence_list{$b}} @roles;
 
     return shift @roles;
 }
 
+# =head2 _load_and_apply_role @roles
+#
+# Require C<$role> if it is not already loaded and apply it. This is
+# the meat of this module.
+#
+# =cut
 
-sub _load_and_apply_role{
-    my ($self, @roles) = @_;
-    die("You must provide a role name") unless @roles;
+sub _load_and_apply_role {
+    my ($self, $role) = @_;
+    die("You must provide a role name") unless $role;
 
-    foreach my $role ( @roles ) {
-        eval { load_class($role) };
-        confess("Failed to load role: ${role} $@") if $@;
+    try { use_module($role) }
+    catch { confess("Failed to load role: ${role} $_") };
 
-        carp("Using 'override' is strongly discouraged and may not behave ".
-            "as you expect it to. Please use 'around'")
-        if scalar keys %{ $role->meta->get_override_method_modifiers_map };
-    }
+    croak("Your plugin '$role' must be a Moose::Role")
+        unless find_meta($role)->isa('Moose::Meta::Role');
 
-    Moose::Util::apply_all_roles( $self, @roles );
+    carp("Using 'override' is strongly discouraged and may not behave ".
+        "as you expect it to. Please use 'around'")
+    if scalar keys %{ $role->meta->get_override_method_modifiers_map };
+
+    Moose::Util::apply_all_roles( $self, $role );
 
     return 1;
 }
 
+# =head2 _build_plugin_app_ns
+#
+# Automatically builds the _plugin_app_ns attribute with the classes in the
+# class precedence list that are not part of Moose.
+#
+# =cut
 
 sub _build_plugin_app_ns{
     my $self = shift;
@@ -133,6 +267,12 @@ sub _build_plugin_app_ns{
     return \@names;
 }
 
+# =head2 _build_plugin_locator
+#
+# Automatically creates a L<Module::Pluggable::Object> instance with the correct
+# search_path.
+#
+# =cut
 
 sub _build_plugin_locator{
     my $self = shift;
@@ -144,6 +284,11 @@ sub _build_plugin_locator{
     return $locator;
 }
 
+# =head2 meta
+#
+# Keep tests happy. See L<Moose>
+#
+# =cut
 
 1;
 
@@ -151,13 +296,17 @@ sub _build_plugin_locator{
 
 =encoding UTF-8
 
+=for :stopwords Guillermo Roditi <groditi@cpan.org> David Hepler Yuval Kogman Steinbrunner
+Karen Etheridge Robert Boone Shawn M Moore Todd instantiation AnnoCPAN
+Stevan
+
 =head1 NAME
 
 MooseX::Object::Pluggable - Make your classes pluggable
 
 =head1 VERSION
 
-version 0.0012
+version 0.0013
 
 =head1 SYNOPSIS
 
@@ -183,8 +332,8 @@ version 0.0012
 
 =head1 DESCRIPTION
 
-This module is meant to be loaded as a role from Moose-based classes
-it will add five methods and four attributes to assist you with the loading
+This module is meant to be loaded as a role from Moose-based classes.
+It will add five methods and four attributes to assist you with the loading
 and handling of plugins and extensions for plugins. I understand that this may
 pollute your namespace, however I took great care in using the least ambiguous
 names possible.
@@ -197,13 +346,13 @@ one instance of a class they can all have different plugins loaded. This is a fe
 
 Plugin methods are allowed to C<around>, C<before>, C<after>
 their consuming classes, so it is important to watch for load order as plugins can
-and will overload each other. You may also add attributes through has.
+and will overload each other. You may also add attributes through C<has>.
 
 Please note that when you load at runtime you lose the ability to wrap C<BUILD>
 and roles using C<has> will not go through compile time checks like C<required>
-and <default>.
+and C<default>.
 
-Even though C<override> will work , I STRONGLY discourage it's use
+Even though C<override> will work, I B<STRONGLY> discourage its use
 and a warning will be thrown if you try to use it.
 This is closely linked to the way multiple roles being applied is handled and is not
 likely to change. C<override> behavior is closely linked to inheritance and thus will
@@ -213,7 +362,8 @@ save yourself the headache.
 =head1 How plugins are loaded
 
 When roles are applied at runtime an anonymous class will wrap your class and
-C<$self-E<gt>blessed> and C<ref $self> will no longer return the name of your object,
+C<< $self->blessed >>, C<< ref $self >> and C<< $self->meta->name >>
+will no longer return the name of your object;
 they will instead return the name of the anonymous class created at runtime.
 See C<_original_class_name>.
 
@@ -225,15 +375,15 @@ For a simple example see the tests included in this distribution.
 
 =head2 _plugin_ns
 
-String. The prefix to use for plugin names provided. MyApp::Plugin is sensible.
+String. The prefix to use for plugin names provided. C<MyApp::Plugin> is sensible.
 
 =head2 _plugin_app_ns
 
-ArrayRef, Accessor automatically dereferences into array on a read call.
-By default will be filled with the class name and its precedents, it is used
+An ArrayRef accessor that automatically dereferences into array on a read call.
+By default it will be filled with the class name and its precedents. It is used
 to determine which directories to look for plugins as well as which plugins
 take precedence upon namespace collisions. This allows you to subclass a pluggable
-class and still use it's plugins while using yours first if they are available.
+class and still use its plugins while using yours first if they are available.
 
 =head2 _plugin_locator
 
@@ -242,9 +392,8 @@ available plugins.
 
 =head2 _original_class_name
 
-=for stopwords instantiation
-
-Because of the way roles apply C<$self-E<gt>blessed> and C<ref $self> will
+Because of the way roles apply, C<< $self->blessed >>, C<< ref $self >>
+and C<< $self->meta->name >> will
 no longer return what you expect. Instead, upon instantiation, the name of the
 class instantiated will be stored in this attribute if you need to access the
 name the class held before any runtime roles were applied.
@@ -314,8 +463,6 @@ You can find documentation for this module with the perldoc command.
 
 You can also look for information at:
 
-=for stopwords AnnoCPAN
-
 =over 4
 
 =item * AnnoCPAN: Annotated CPAN documentation
@@ -337,8 +484,6 @@ L<http://search.cpan.org/dist/MooseX-Object-Pluggable>
 =back
 
 =head1 ACKNOWLEDGEMENTS
-
-=for stopwords Stevan
 
 =over 4
 
@@ -362,6 +507,36 @@ This software is copyright (c) 2007 by Guillermo Roditi <groditi@cpan.org>.
 
 This is free software; you can redistribute it and/or modify it under
 the same terms as the Perl 5 programming language system itself.
+
+=head1 CONTRIBUTORS
+
+=over 4
+
+=item *
+
+David Steinbrunner <dsteinbrunner@pobox.com>
+
+=item *
+
+Karen Etheridge <ether@cpan.org>
+
+=item *
+
+Robert Boone <robo4288@gmail.com>
+
+=item *
+
+Shawn M Moore <sartak@gmail.com>
+
+=item *
+
+Todd Hepler <thepler@employees.org>
+
+=item *
+
+Yuval Kogman <nothingmuch@woobling.org>
+
+=back
 
 =cut
 
